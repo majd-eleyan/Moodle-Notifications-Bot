@@ -213,13 +213,33 @@ while True:
                     send_message(chat_id, "أدخل كلمة السر")
 
                 elif users[chat_id]["step"] == "password":
-                    encrypted = cipher.encrypt(text.encode()).decode()
+
+                    username = users[chat_id]["username"]
+                    password = text
+
+                    print(f"🔍 محاولة تسجيل دخول: {username}")
+
+                    # نجرب تسجيل الدخول
+                    session = login_and_get_session(username, password)
+
+                    if not session:
+                         print(f"❌ فشل تسجيل الدخول: {username}")
+                         send_message(chat_id, "بيانات غير صحيحة، حاول مرة أخرى")
+                         users[chat_id]["step"] = "username"
+                         continue
+
+                    # نجح تسجيل الدخول
+                    print(f"✅ تسجيل دخول ناجح: {username}")
+
+                    encrypted = cipher.encrypt(password.encode()).decode()
+
                     users[chat_id]["password"] = encrypted
                     users[chat_id]["step"] = "done"
                     users[chat_id]["last_seen"] = []
-                    save_user(chat_id)
-                    send_message(chat_id, "تم التسجيل")
 
+                    save_user(chat_id)
+
+                    send_message(chat_id, "تم التسجيل بنجاح")
                 else:
                     send_message(chat_id, WELCOME_MSG)
 
