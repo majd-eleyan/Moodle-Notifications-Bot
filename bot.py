@@ -8,19 +8,11 @@ from cryptography.fernet import Fernet
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 
-# -------------- CONFIG -----------------
+# ---------------- CONFIG ----------------
 TOKEN = os.getenv("TOKEN")
-WELCOME_MSG = "البوت شغال ، أي تحديث جديد سيصلك مباشرة"
 MOODLE_URL = "https://moodle.alaqsa.edu.ps"
 
-if not TOKEN:
-    raise Exception("TOKEN is missing")
-
-secret = os.getenv("SECRET_KEY")
-if not secret:
-    raise Exception("SECRET_KEY is missing")
-
-cipher = Fernet(secret.encode())
+cipher = Fernet(os.getenv("SECRET_KEY").encode())
 
 # ---------- DATABASE ----------
 conn = sqlite3.connect("users.db", check_same_thread=False)
@@ -70,22 +62,26 @@ def save_user(chat_id):
 # ---------- TELEGRAM ----------
 def send_message(chat_id, text):
     try:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=10)
+        requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            data={"chat_id": chat_id, "text": text},
+            timeout=10
+        )
     except Exception as e:
         print("Send error:", e)
 
 def get_updates(offset=None):
     try:
-        url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
-        r = requests.get(url, params={"offset": offset}, timeout=10).json()
-        if not r.get("ok"):
-            return {"result": []}
-        return r
+        r = requests.get(
+            f"https://api.telegram.org/bot{TOKEN}/getUpdates",
+            params={"offset": offset},
+            timeout=10
+        ).json()
+        return r if r.get("ok") else {"result": []}
     except:
         return {"result": []}
 
-# ---------- MOODLE SESSION ----------
+# ---------- LOGIN ----------
 def login_and_get_session(username, password):
     session = requests.Session()
     session.headers.update({
@@ -94,15 +90,15 @@ def login_and_get_session(username, password):
     })
 
     try:
-        # جلب صفحة الدخول لاستخراج logintoken
-        resp = session.get(MOODLE_URL + "/login/index.php", timeout=10)
-        token_match = re.search(r'name="logintoken" value="([^"]+)"', resp.text)
-        logintoken = token_match.group(1) if token_match else ""
+        login_page = session.get(MOODLE_URL + "/login/index.php", timeout=10)
+
+        token_match = re.search(r'name="logintoken" value="([^"]+)"', login_page.text)
+        token = token_match.group(1) if token_match else ""
 
         payload = {
             "username": username,
             "password": password,
-            "logintoken": logintoken
+            "logintoken": token
         }
 
         session.post(MOODLE_URL + "/login/index.php", data=payload, timeout=10)
@@ -110,15 +106,17 @@ def login_and_get_session(username, password):
         dash = session.get(MOODLE_URL + "/my/", timeout=10)
 
         if "login" in dash.url or "login" in dash.text.lower():
+            print(f"❌ فشل تسجيل الدخول: {username}")
             return None
 
+        print(f"✅ تسجيل دخول ناجح: {username}")
         return session
 
     except Exception as e:
         print("Login error:", e)
         return None
 
-# ---------- FETCH UPDATES ----------
+# ---------- FETCH ----------
 def fetch_moodle_updates(username, password):
     session = login_and_get_session(username, password)
     if not session:
@@ -129,32 +127,31 @@ def fetch_moodle_updates(username, password):
     try:
         dashboard = session.get(MOODLE_URL + "/my/", timeout=10)
 
-        # استخراج روابط المساقات
         course_links = re.findall(
             r'href="(https://moodle\.alaqsa\.edu\.ps/course/view\.php\?id=\d+)"',
             dashboard.text
         )
-        course_links = list(set(course_links))
 
-        for course_url in course_links:
+        for course_url in set(course_links):
             try:
-                course_page = session.get(course_url, timeout=10)
+                page = session.get(course_url, timeout=10)
 
                 # اسم المساق
-                title_match = re.search(r'<title>(.*?)</title>', course_page.text, re.IGNORECASE)
-                course_title = title_match.group(1).strip() if title_match else "Course"
+                title_match = re.search(r'<title>(.*?)</title>', page.text, re.IGNORECASE)
+                course_title = title_match.group(1).strip() if title_match else "مساق"
 
                 # الأنشطة
                 activities = re.findall(
                     r'<a[^>]+href="(https://moodle\.alaqsa\.edu\.ps/mod/[^"]+)"[^>]*>(.*?)</a>',
-                    course_page.text,
+                    page.text,
                     re.DOTALL
                 )
 
-                for link, raw_text in activities:
-                    text = re.sub("<.*?>", "", raw_text).strip()
-                    if text:
-                        updates.append(f"{course_title} - {text} - {link}")
+                for href, raw in activities:
+                    text = re.sub("<.*?>", "", raw).strip()
+
+                    if text and len(text) > 3:
+                        updates.append(f"{course_title}\n{text}\n{href}")
 
             except:
                 continue
@@ -165,7 +162,7 @@ def fetch_moodle_updates(username, password):
         print("Fetch error:", e)
         return []
 
-# ---------- SERVER (Render) ----------
+# ---------- SERVER ----------
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -181,9 +178,6 @@ threading.Thread(target=run_server, daemon=True).start()
 # ---------- MAIN ----------
 load_users()
 print("Bot started")
-
-for chat_id in users:
-    send_message(chat_id, WELCOME_MSG)
 
 last_update_id = None
 last_check_time = 0
@@ -219,17 +213,12 @@ while True:
 
                     print(f"🔍 محاولة تسجيل دخول: {username}")
 
-                    # نجرب تسجيل الدخول
                     session = login_and_get_session(username, password)
 
                     if not session:
-                         print(f"❌ فشل تسجيل الدخول: {username}")
-                         send_message(chat_id, "بيانات غير صحيحة، حاول مرة أخرى")
-                         users[chat_id]["step"] = "username"
-                         continue
-
-                    # نجح تسجيل الدخول
-                    print(f"✅ تسجيل دخول ناجح: {username}")
+                        send_message(chat_id, "بيانات غير صحيحة")
+                        users[chat_id]["step"] = "username"
+                        continue
 
                     encrypted = cipher.encrypt(password.encode()).decode()
 
@@ -240,13 +229,14 @@ while True:
                     save_user(chat_id)
 
                     send_message(chat_id, "تم التسجيل بنجاح")
+
                 else:
-                    send_message(chat_id, WELCOME_MSG)
+                    send_message(chat_id, "البوت يعمل")
 
             else:
                 send_message(chat_id, "اكتب /start")
 
-        # فحص التحديثات
+        # ---------- CHECK ----------
         if time.time() - last_check_time > 60:
             last_check_time = time.time()
 
@@ -262,14 +252,14 @@ while True:
                 diff = [u for u in new_updates if u not in data.get("last_seen", [])]
 
                 for item in diff:
-                    send_message(chat_id, item)
+                    send_message(chat_id, f"تحديث جديد:\n{item}")
 
                 if diff:
                     users[chat_id]["last_seen"].extend(diff)
                     save_user(chat_id)
 
-        time.sleep(1)
+        time.sleep(2)
 
     except Exception as e:
-        print("Main loop error:", e)
-        time.sleep(3)
+        print("Main error:", e)
+        time.sleep(5)
