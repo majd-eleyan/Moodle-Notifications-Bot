@@ -1,12 +1,18 @@
 import time
 import json
 import os
-import re
-import requests
 import sqlite3
+import requests
 from cryptography.fernet import Fernet
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
+
+# Selenium
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.service import Service
 
 # ---------------- CONFIG ----------------
 TOKEN = os.getenv("TOKEN")
@@ -29,7 +35,6 @@ CREATE TABLE IF NOT EXISTS users (
 """)
 conn.commit()
 
-# ---------- USERS ----------
 users = {}
 
 def load_users():
@@ -48,8 +53,7 @@ def load_users():
 def save_user(chat_id):
     data = users[chat_id]
     cursor.execute("""
-    INSERT OR REPLACE INTO users (chat_id, username, password, step, last_seen)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT OR REPLACE INTO users VALUES (?, ?, ?, ?, ?)
     """, (
         chat_id,
         data.get("username"),
@@ -67,8 +71,8 @@ def send_message(chat_id, text):
             data={"chat_id": chat_id, "text": text},
             timeout=10
         )
-    except Exception as e:
-        print("Send error:", e)
+    except:
+        pass
 
 def get_updates(offset=None):
     try:
@@ -81,86 +85,68 @@ def get_updates(offset=None):
     except:
         return {"result": []}
 
-# ---------- LOGIN ----------
-def login_and_get_session(username, password):
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0",
-        "Referer": MOODLE_URL + "/login/index.php"
-    })
+# ---------- SELENIUM ----------
+def init_driver():
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
 
-    try:
-        login_page = session.get(MOODLE_URL + "/login/index.php", timeout=10)
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()),
+        options=options
+    )
+    return driver
 
-        token_match = re.search(r'name="logintoken" value="([^"]+)"', login_page.text)
-        token = token_match.group(1) if token_match else ""
-
-        payload = {
-            "username": username,
-            "password": password,
-            "logintoken": token
-        }
-
-        session.post(MOODLE_URL + "/login/index.php", data=payload, timeout=10)
-
-        dash = session.get(MOODLE_URL + "/my/", timeout=10)
-
-        if "login" in dash.url or "login" in dash.text.lower():
-            print(f"❌ فشل تسجيل الدخول: {username}")
-            return None
-
-        print(f"✅ تسجيل دخول ناجح: {username}")
-        return session
-
-    except Exception as e:
-        print("Login error:", e)
-        return None
-
-# ---------- FETCH ----------
-def fetch_moodle_updates(username, password):
-    session = login_and_get_session(username, password)
-    if not session:
-        return []
-
+def login_and_fetch(username, password):
+    driver = init_driver()
     updates = []
 
     try:
-        dashboard = session.get(MOODLE_URL + "/my/", timeout=10)
+        driver.get(MOODLE_URL + "/login/index.php")
 
-        course_links = re.findall(
-            r'href="(https://moodle\.alaqsa\.edu\.ps/course/view\.php\?id=\d+)"',
-            dashboard.text
-        )
+        driver.find_element(By.NAME, "username").send_keys(username)
+        driver.find_element(By.NAME, "password").send_keys(password)
+        driver.find_element(By.ID, "loginbtn").click()
 
-        for course_url in set(course_links):
+        time.sleep(3)
+
+        if "login" in driver.current_url:
+            print(f"❌ فشل تسجيل الدخول: {username}")
+            driver.quit()
+            return None
+
+        print(f"✅ تسجيل دخول ناجح: {username}")
+
+        courses = driver.find_elements(By.CSS_SELECTOR, ".coursebox a, .card a")
+
+        for course in courses:
             try:
-                page = session.get(course_url, timeout=10)
+                title = course.text.strip()
+                link = course.get_attribute("href")
 
-                # اسم المساق
-                title_match = re.search(r'<title>(.*?)</title>', page.text, re.IGNORECASE)
-                course_title = title_match.group(1).strip() if title_match else "مساق"
+                driver.get(link)
+                time.sleep(2)
 
-                # الأنشطة
-                activities = re.findall(
-                    r'<a[^>]+href="(https://moodle\.alaqsa\.edu\.ps/mod/[^"]+)"[^>]*>(.*?)</a>',
-                    page.text,
-                    re.DOTALL
-                )
+                activities = driver.find_elements(By.CSS_SELECTOR, ".activityinstance a")
 
-                for href, raw in activities:
-                    text = re.sub("<.*?>", "", raw).strip()
+                for act in activities:
+                    text = act.text.strip()
+                    href = act.get_attribute("href")
 
-                    if text and len(text) > 3:
-                        updates.append(f"{course_title}\n{text}\n{href}")
+                    if text:
+                        updates.append(f"{title}\n{text}\n{href}")
 
             except:
                 continue
 
+        driver.quit()
         return list(set(updates))
 
     except Exception as e:
-        print("Fetch error:", e)
-        return []
+        print("Selenium error:", e)
+        driver.quit()
+        return None
 
 # ---------- SERVER ----------
 class Handler(BaseHTTPRequestHandler):
@@ -213,9 +199,9 @@ while True:
 
                     print(f"🔍 محاولة تسجيل دخول: {username}")
 
-                    session = login_and_get_session(username, password)
+                    result = login_and_fetch(username, password)
 
-                    if not session:
+                    if result is None:
                         send_message(chat_id, "بيانات غير صحيحة")
                         users[chat_id]["step"] = "username"
                         continue
@@ -236,8 +222,8 @@ while True:
             else:
                 send_message(chat_id, "اكتب /start")
 
-        # ---------- CHECK ----------
-        if time.time() - last_check_time > 60:
+        # CHECK UPDATES
+        if time.time() - last_check_time > 120:
             last_check_time = time.time()
 
             for chat_id, data in users.items():
@@ -247,7 +233,10 @@ while True:
                 username = data["username"]
                 password = cipher.decrypt(data["password"].encode()).decode()
 
-                new_updates = fetch_moodle_updates(username, password)
+                new_updates = login_and_fetch(username, password)
+
+                if not new_updates:
+                    continue
 
                 diff = [u for u in new_updates if u not in data.get("last_seen", [])]
 
@@ -258,8 +247,8 @@ while True:
                     users[chat_id]["last_seen"].extend(diff)
                     save_user(chat_id)
 
-        time.sleep(2)
+        time.sleep(5)
 
     except Exception as e:
         print("Main error:", e)
-        time.sleep(5)
+        time.sleep(10)
