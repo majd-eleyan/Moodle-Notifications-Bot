@@ -79,7 +79,21 @@ def get_updates(offset=None):
     except:
         return {"result": []}
 
-# ---------- MOODLE LOGIN ----------
+# ---------- MOODLE ----------
+def get_activity_type(name, href):
+    name_lower = name.lower()
+
+    if "assignment" in name_lower or "واجب" in name_lower:
+        return "📢 واجب"
+    elif "quiz" in name_lower or "اختبار" in name_lower:
+        return "🧪 اختبار"
+    elif "file" in name_lower or "ملف" in name_lower:
+        return "📄 ملف"
+    elif "page" in name_lower:
+        return "📘 صفحة"
+    else:
+        return "📌 نشاط جديد"
+
 def login_and_fetch(username, password):
     session = requests.Session()
 
@@ -98,10 +112,12 @@ def login_and_fetch(username, password):
             "logintoken": logintoken
         }
 
-        login = session.post(MOODLE_URL + "/login/index.php", data=payload)
+        session.post(MOODLE_URL + "/login/index.php", data=payload)
 
-        # 3. تحقق من النجاح
-        if "loginerrors" in login.text or "Invalid login" in login.text:
+        # 3. تحقق حقيقي من الدخول
+        dash = session.get(MOODLE_URL + "/my/")
+
+        if "login" in dash.url or "login" in dash.text.lower():
             print(f"❌ فشل تسجيل الدخول: {username}")
             return None
 
@@ -109,10 +125,7 @@ def login_and_fetch(username, password):
 
         updates = []
 
-        # 4. ادخل Dashboard
-        dash = session.get(MOODLE_URL + "/my/")
         soup = BeautifulSoup(dash.text, "html.parser")
-
         courses = soup.select("a[href*='course/view']")
 
         for c in courses:
@@ -133,12 +146,19 @@ def login_and_fetch(username, password):
                     href = act.get("href")
 
                     if name:
-                        updates.append(f"{title}\n{name}\n{href}")
+                        act_type = get_activity_type(name, href)
+
+                        updates.append({
+                            "course": title,
+                            "name": name,
+                            "link": href,
+                            "type": act_type
+                        })
 
             except:
                 continue
 
-        return list(set(updates))
+        return updates
 
     except Exception as e:
         print("Request error:", e)
@@ -204,7 +224,9 @@ while True:
 
                     users[chat_id]["password"] = encrypted
                     users[chat_id]["step"] = "done"
-                    users[chat_id]["last_seen"] = []
+
+                    # أول مرة → خزّن بدون إرسال
+                    users[chat_id]["last_seen"] = result
 
                     save_user(chat_id)
 
@@ -233,10 +255,20 @@ while True:
                     continue
 
                 old = data.get("last_seen", [])
-                diff = [u for u in new_updates if u not in old]
+
+                # مقارنة ذكية
+                diff = [
+                    u for u in new_updates
+                    if u not in old
+                ]
 
                 for item in diff:
-                    send_message(chat_id, f"📢 تحديث جديد:\n{item}")
+                    msg = f"""{item['type']}
+📚 {item['course']}
+📝 {item['name']}
+🔗 {item['link']}"""
+
+                    send_message(chat_id, msg)
 
                 if diff:
                     users[chat_id]["last_seen"].extend(diff)
