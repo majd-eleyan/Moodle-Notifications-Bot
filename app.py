@@ -6,13 +6,7 @@ import requests
 from cryptography.fernet import Fernet
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
-
-# Selenium
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.chrome.service import Service
+from bs4 import BeautifulSoup
 
 # ---------------- CONFIG ----------------
 TOKEN = os.getenv("TOKEN")
@@ -85,67 +79,69 @@ def get_updates(offset=None):
     except:
         return {"result": []}
 
-# ---------- SELENIUM ----------
-def init_driver():
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=options
-    )
-    return driver
-
+# ---------- MOODLE LOGIN ----------
 def login_and_fetch(username, password):
-    driver = init_driver()
-    updates = []
+    session = requests.Session()
 
     try:
-        driver.get(MOODLE_URL + "/login/index.php")
+        # 1. GET login page
+        r = session.get(MOODLE_URL + "/login/index.php")
+        soup = BeautifulSoup(r.text, "html.parser")
 
-        driver.find_element(By.NAME, "username").send_keys(username)
-        driver.find_element(By.NAME, "password").send_keys(password)
-        driver.find_element(By.ID, "loginbtn").click()
+        token_input = soup.find("input", {"name": "logintoken"})
+        logintoken = token_input["value"] if token_input else ""
 
-        time.sleep(3)
+        # 2. POST login
+        payload = {
+            "username": username,
+            "password": password,
+            "logintoken": logintoken
+        }
 
-        if "login" in driver.current_url:
+        login = session.post(MOODLE_URL + "/login/index.php", data=payload)
+
+        # 3. تحقق من النجاح
+        if "loginerrors" in login.text or "Invalid login" in login.text:
             print(f"❌ فشل تسجيل الدخول: {username}")
-            driver.quit()
             return None
 
         print(f"✅ تسجيل دخول ناجح: {username}")
 
-        courses = driver.find_elements(By.CSS_SELECTOR, ".coursebox a, .card a")
+        updates = []
 
-        for course in courses:
+        # 4. ادخل Dashboard
+        dash = session.get(MOODLE_URL + "/my/")
+        soup = BeautifulSoup(dash.text, "html.parser")
+
+        courses = soup.select("a[href*='course/view']")
+
+        for c in courses:
+            title = c.text.strip()
+            link = c.get("href")
+
+            if not title or not link:
+                continue
+
             try:
-                title = course.text.strip()
-                link = course.get_attribute("href")
+                course_page = session.get(link)
+                course_soup = BeautifulSoup(course_page.text, "html.parser")
 
-                driver.get(link)
-                time.sleep(2)
-
-                activities = driver.find_elements(By.CSS_SELECTOR, ".activityinstance a")
+                activities = course_soup.select(".activityinstance a")
 
                 for act in activities:
-                    text = act.text.strip()
-                    href = act.get_attribute("href")
+                    name = act.text.strip()
+                    href = act.get("href")
 
-                    if text:
-                        updates.append(f"{title}\n{text}\n{href}")
+                    if name:
+                        updates.append(f"{title}\n{name}\n{href}")
 
             except:
                 continue
 
-        driver.quit()
         return list(set(updates))
 
     except Exception as e:
-        print("Selenium error:", e)
-        driver.quit()
+        print("Request error:", e)
         return None
 
 # ---------- SERVER ----------
@@ -197,12 +193,10 @@ while True:
                     username = users[chat_id]["username"]
                     password = text
 
-                    print(f"🔍 محاولة تسجيل دخول: {username}")
-
                     result = login_and_fetch(username, password)
 
                     if result is None:
-                        send_message(chat_id, "بيانات غير صحيحة")
+                        send_message(chat_id, "❌ بيانات غير صحيحة")
                         users[chat_id]["step"] = "username"
                         continue
 
@@ -214,15 +208,15 @@ while True:
 
                     save_user(chat_id)
 
-                    send_message(chat_id, "تم التسجيل بنجاح")
+                    send_message(chat_id, "✅ تم التسجيل بنجاح")
 
                 else:
-                    send_message(chat_id, "البوت يعمل")
+                    send_message(chat_id, "🤖 البوت يعمل")
 
             else:
                 send_message(chat_id, "اكتب /start")
 
-        # CHECK UPDATES
+        # ---------- CHECK UPDATES ----------
         if time.time() - last_check_time > 120:
             last_check_time = time.time()
 
@@ -238,17 +232,18 @@ while True:
                 if not new_updates:
                     continue
 
-                diff = [u for u in new_updates if u not in data.get("last_seen", [])]
+                old = data.get("last_seen", [])
+                diff = [u for u in new_updates if u not in old]
 
                 for item in diff:
-                    send_message(chat_id, f"تحديث جديد:\n{item}")
+                    send_message(chat_id, f"📢 تحديث جديد:\n{item}")
 
                 if diff:
                     users[chat_id]["last_seen"].extend(diff)
                     save_user(chat_id)
 
-        time.sleep(5)
+        time.sleep(2)
 
     except Exception as e:
         print("Main error:", e)
-        time.sleep(10)
+        time.sleep(5)
